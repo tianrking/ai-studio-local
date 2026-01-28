@@ -6,6 +6,7 @@ Antenna behaviors (opposite motor directions):
 - Idle: Antennas breathe open/close (↔ ↕)
 - Drawing: Antennas fold inward (→←)
 - Firing: Antennas spread outward (←→)
+- Eliminated: Body spin celebration (correct hit! blocks input)
 
 Prerequisites:
     reachy-mini-daemon should be running
@@ -36,7 +37,8 @@ MAX_EVENTS = 100
 # Robot state
 robot_state = {
     'mode': 'idle',  # idle, drawing, fired
-    'power_level': 0.0
+    'power_level': 0.0,
+    'animating': False  # Busy with animation, ignore events
 }
 
 idle_thread_running = True
@@ -82,6 +84,21 @@ def set_antennas(left_deg, right_deg):
         robot.set_target(
             head=STATIC_HEAD_POSE,
             antennas=[left_rad, right_rad]
+        )
+    except Exception as e:
+        pass
+
+
+def goto_body(body_yaw_deg, duration=0.3):
+    """Rotate body smoothly."""
+    try:
+        body_yaw_rad = math.radians(body_yaw_deg)
+
+        robot.goto_target(
+            head=STATIC_HEAD_POSE,
+            antennas=[0, 0],
+            body_yaw=body_yaw_rad,
+            duration=duration
         )
     except Exception as e:
         pass
@@ -157,6 +174,40 @@ def handle_slingshot_fire(data):
     threading.Thread(target=return_to_idle, daemon=True).start()
 
 
+def handle_bubble_eliminated(data):
+    """Bubbles eliminated (correct hit!) - body celebration animation."""
+    count = data.get('count', 0)
+    color = data.get('colorLabel', 'Unknown')
+
+    print(f"   🤖 [ELIMINATED] {count} {color} bubbles - celebration spin!")
+
+    with idle_lock:
+        robot_state['animating'] = True
+        robot_state['mode'] = 'celebrating'
+
+    # Body spin animation for celebration
+    try:
+        # Rotate left
+        goto_body(-30, duration=0.2)
+        time.sleep(0.25)
+
+        # Rotate right (faster)
+        goto_body(30, duration=0.15)
+        time.sleep(0.2)
+
+        # Return to center
+        goto_body(0, duration=0.25)
+        time.sleep(0.3)
+    except Exception as e:
+        print(f"   ❌ Animation error: {e}")
+
+    with idle_lock:
+        robot_state['animating'] = False
+        robot_state['mode'] = 'idle'
+
+    print("   ✅ Animation complete - accepting events again")
+
+
 # ========================================================================
 # HELPER FUNCTIONS
 # ========================================================================
@@ -225,7 +276,13 @@ def receive_event():
     handlers = {
         'slingshot_draw': handle_slingshot_draw,
         'slingshot_fire': handle_slingshot_fire,
+        'bubble_eliminated': handle_bubble_eliminated,
     }
+
+    # Skip events if busy animating (body spin)
+    if robot_state['animating']:
+        print(f"   ⏸️  Animation in progress - event ignored")
+        return jsonify({'status': 'ignored', 'reason': 'animating'})
 
     handler = handlers.get(event_type)
     if handler:
@@ -258,6 +315,7 @@ if __name__ == '__main__':
 ║    🎯 Idle       - Antennas breathe open/close            ║
 ║    🎯 Drawing    - Antennas fold inward (→←)              ║
 ║    🎯 Firing     - Antennas spread outward (←→)            ║
+║    🎯 Eliminated - Body spin celebration (correct hit!)    ║
 ║                                                            ║
 ╚════════════════════════════════════════════════════════════╝
 """)

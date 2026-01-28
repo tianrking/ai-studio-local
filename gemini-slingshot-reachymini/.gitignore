@@ -12,6 +12,23 @@ dist
 dist-ssr
 *.local
 
+# Python services
+services/venv/
+services/__pycache__/
+services/*.pyc
+services/*.pyo
+services/*.pyd
+services/.Python/
+services/*.so
+services/*.egg-info/
+.eggs/
+build/
+dist/
+
+# Environment files (keep .env.example)
+.env.local
+.env
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
