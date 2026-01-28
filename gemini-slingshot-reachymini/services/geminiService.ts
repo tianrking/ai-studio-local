@@ -3,194 +3,203 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GoogleGenAI } from '@google/genai';
-import type { Bubble, BubbleColor, AiResponse, StrategicHint, DebugInfo } from '../types';
+import { GoogleGenAI } from "@google/genai";
+import { StrategicHint, AiResponse, DebugInfo } from "../types";
 
-const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
-const MODEL_NAME = 'gemini-2.5-flash-exp';
+// Initialize Gemini Client
+let ai: GoogleGenAI | null = null;
 
-interface ClusterInfo {
-  color: BubbleColor;
-  count: number;
-  bubbles: Array<{ row: number; col: number }>;
+const API_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
+
+if (API_KEY) {
+    ai = new GoogleGenAI({ apiKey: API_KEY });
+} else {
+    console.error("GEMINI_API_KEY is missing from environment variables.");
 }
 
-function getApiKey(): string {
-  const key = import.meta.env.VITE_GEMINI_API_KEY || GEMINI_API_KEY;
-  if (!key || key === 'YOUR_GEMINI_API_KEY_HERE') {
-    throw new Error('GEMINI_API_KEY not configured. Please set VITE_GEMINI_API_KEY in your .env.local file.');
-  }
-  return key;
-}
-
-function analyzeBubbles(bubbles: Bubble[]): ClusterInfo[] {
-  const clusters = new Map<BubbleColor, ClusterInfo>();
-
-  for (const bubble of bubbles) {
-    if (!bubble.active) continue;
-
-    let cluster = clusters.get(bubble.color);
-    if (!cluster) {
-      cluster = { color: bubble.color, count: 0, bubbles: [] };
-      clusters.set(bubble.color, cluster);
-    }
-    cluster.count++;
-    cluster.bubbles.push({ row: bubble.row, col: bubble.col });
-  }
-
-  return Array.from(clusters.values()).sort((a, b) => b.count - a.count);
-}
-
-function buildPrompt(allBubbles: Bubble[], maxRow: number): string {
-  const clusters = analyzeBubbles(allBubbles);
-  const totalActive = allBubbles.filter(b => b.active).length;
-  const maxClusterSize = clusters.length > 0 ? clusters[0].count : 0;
-  const minClusterSize = clusters.length > 0 ? clusters[clusters.length - 1].count : 0;
-
-  let prompt = `You are analyzing a bubble shooter puzzle game to provide strategic advice.
-
-GAME STATE:
-- Total active bubbles: ${totalActive}
-- Maximum row with bubbles: ${maxRow}
-- Rows are arranged in a hexagonal pattern (odd rows are offset)
-
-BUBBLE CLUSTERS (grouped by color, size ${maxClusterSize} to ${minClusterSize}):
-`;
-
-  for (const cluster of clusters) {
-    prompt += `- ${cluster.color}: ${cluster.count} bubbles at positions: ${cluster.bubbles.slice(0, 5).map(b => `(${b.row},${b.col})`).join(', ')}${cluster.bubbles.length > 5 ? '...' : ''}\n`;
-  }
-
-  prompt += `
-ANALYSIS TASKS:
-1. Identify the most promising target (largest cluster or one that will cause chain reactions)
-2. Suggest the best color to use
-3. Provide a brief strategic hint (max 15 words)
-
-RESPONSE FORMAT (strict JSON):
-{
-  "hint": "Your strategic hint here (max 15 words)",
-  "rationale": "Brief explanation of why this target is good (max 25 words)",
-  "targetRow": <row number 0-${maxRow}>,
-  "targetCol": <column number>,
-  "recommendedColor": "<color from: red, blue, green, yellow, purple, orange>"
-}
-
-IMPORTANT: Choose targetRow and targetCol that match an EXISTING bubble from the clusters above.`;
-
-  return prompt;
-}
-
-async function callGemini(prompt: string, imageData?: string): Promise<string> {
-  const ai = new GoogleGenAI(getApiKey());
-  const model = ai.getGenerativeModel({ model: MODEL_NAME });
-
-  const contents: any[] = [{ role: 'user', parts: [{ text: prompt }] }];
-
-  if (imageData) {
-    contents[0].parts.unshift({
-      inlineData: {
-        mimeType: 'image/png',
-        data: imageData
-      }
-    });
-  }
-
-  const result = await model.generateContent(contents);
-  const response = result.response;
-  return response.text();
-}
-
-function parseGeminiResponse(responseText: string): StrategicHint {
-  // Try to extract JSON from the response
-  const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      return JSON.parse(jsonMatch[0]);
-    } catch {
-      // Fall through to default parsing
-    }
-  }
-
-  // Fallback parsing
-  const lines = responseText.split('\n');
-  return {
-    message: lines[0]?.trim() || 'Aim for the largest cluster to maximize eliminations.',
-    rationale: 'AI analysis completed'
-  };
-}
+const MODEL_NAME = "gemini-3-flash-preview";
 
 export interface TargetCandidate {
+  id: string;
+  color: string;
+  size: number;
   row: number;
   col: number;
-  clusterSize: number;
-  color: BubbleColor;
+  pointsPerBubble: number;
+  description: string;
 }
 
-export async function getStrategicHint(
-  screenshot?: string,
-  allBubbles: Bubble[] = [],
-  maxRow: number = 0
-): Promise<AiResponse> {
+export const getStrategicHint = async (
+  imageBase64: string,
+  validTargets: TargetCandidate[],
+  dangerRow: number
+): Promise<AiResponse> => {
   const startTime = performance.now();
-  const timestamp = new Date().toISOString();
 
-  const debugInfo: DebugInfo = {
+  // Default debug info container
+  const debug: DebugInfo = {
     latency: 0,
-    screenshotBase64: screenshot?.substring(0, 100) + '...',
-    promptContext: `Bubbles: ${allBubbles.filter(b => b.active).length}, MaxRow: ${maxRow}`,
-    rawResponse: '',
-    timestamp
+    screenshotBase64: imageBase64,
+    promptContext: "",
+    rawResponse: "",
+    timestamp: new Date().toLocaleTimeString()
   };
 
-  try {
-    const prompt = buildPrompt(allBubbles, maxRow);
-    const rawResponse = await callGemini(prompt, screenshot);
-
-    debugInfo.rawResponse = rawResponse;
-    debugInfo.parsedResponse = rawResponse.substring(0, 200) + '...';
-
-    const hint = parseGeminiResponse(rawResponse);
-    debugInfo.latency = Math.round(performance.now() - startTime);
-
-    return { hint, debug: debugInfo };
-  } catch (error) {
-    debugInfo.error = error instanceof Error ? error.message : String(error);
-    debugInfo.latency = Math.round(performance.now() - startTime);
-
+  if (!ai) {
     return {
-      hint: {
-        message: 'Aim for the largest cluster to maximize eliminations.',
-        rationale: 'AI unavailable - using default strategy'
-      },
-      debug: debugInfo
+        hint: { message: "API Key missing." },
+        debug: { ...debug, error: "API Key Missing" }
     };
   }
-}
 
-export function getTargetCandidates(allBubbles: Bubble[]): TargetCandidate[] {
-  const candidates: TargetCandidate[] = [];
-  const processed = new Set<string>();
+  // Local Heuristic Fallback
+  const getBestLocalTarget = (msg: string = "No clear shots—play defensively."): StrategicHint => {
+    if (validTargets.length > 0) {
+        // Sort by Total Potential Score (Size * Value) then Height
+        const best = validTargets.sort((a,b) => {
+            const scoreA = a.size * a.pointsPerBubble;
+            const scoreB = b.size * b.pointsPerBubble;
+            return (scoreB - scoreA) || (a.row - b.row);
+        })[0];
 
-  for (const bubble of allBubbles) {
-    if (!bubble.active) continue;
-    const key = `${bubble.row},${bubble.col}`;
-    if (processed.has(key)) continue;
-    processed.add(key);
+        return {
+            message: `Fallback: Select ${best.color.toUpperCase()} at Row ${best.row}`,
+            rationale: "Selected based on highest potential cluster score available locally.",
+            targetRow: best.row,
+            targetCol: best.col,
+            recommendedColor: best.color as any
+        };
+    }
+    return { message: msg, rationale: "No valid clusters found to target." };
+  };
 
-    const neighbors = allBubbles.filter(b =>
-      b.active &&
-      b.color === bubble.color &&
-      (Math.abs(b.row - bubble.row) <= 1 && Math.abs(b.col - bubble.col) <= 1)
-    );
+  const hasDirectTargets = validTargets.length > 0;
 
-    candidates.push({
-      row: bubble.row,
-      col: bubble.col,
-      clusterSize: neighbors.length,
-      color: bubble.color
+  const targetListStr = hasDirectTargets
+    ? validTargets.map(t =>
+        `- OPTION: Select ${t.color.toUpperCase()} (${t.pointsPerBubble} pts/bubble) -> Target [Row ${t.row}, Col ${t.col}]. Cluster Size: ${t.size}. Total Value: ${t.size * t.pointsPerBubble}.`
+      ).join("\n")
+    : "NO MATCHES AVAILABLE. Suggest a color to set up a future combo.";
+
+  debug.promptContext = targetListStr;
+
+  const prompt = `
+    You are a strategic gaming AI analyzing a Bubble Shooter game where the player can CHOOSE their projectile color.
+    I have provided a screenshot of the current board and a list of valid targets for all available colors.
+
+    ### GAME STATE
+    - Danger Level: ${dangerRow >= 6 ? "CRITICAL (Bubbles near bottom!)" : "Stable"}
+
+    ### SCORING RULES
+    - Red: 100 pts
+    - Blue: 150 pts
+    - Green: 200 pts
+    - Yellow: 250 pts
+    - Purple: 300 pts
+    - Orange: 500 pts (High Value Target!)
+
+    ### AVAILABLE MOVES (Validated Clear Shots)
+    ${targetListStr}
+
+    ### YOUR TASK
+    Analyze the visual board state.
+    1. Choose the BEST color for the player to equip.
+    2. Tell them where to shoot that specific color.
+
+    Prioritize:
+    1. **High Score**: Hitting high-value colors (Orange/Purple) matches.
+    2. **Avalanche**: Hitting high up on the board to drop non-matching bubbles below.
+    3. **Survival**: If Danger is CRITICAL, ignore score and clear the lowest bubbles.
+
+    ### OUTPUT FORMAT
+    Return RAW JSON only. Do not use Markdown. Do not use code blocks.
+    JSON structure:
+    {
+      "message": "Short operational directive (e.g. 'Target the Red Cluster')",
+      "rationale": "One sentence explaining the strategic benefit (e.g. 'This clears 5 bubbles and exposes a high-value Orange target.')",
+      "recommendedColor": "red|blue|green|yellow|purple|orange",
+      "targetRow": integer,
+      "targetCol": integer
+    }
+  `;
+
+  try {
+    // Strip the data:image/png;base64, prefix if present
+    const cleanBase64 = imageBase64.replace(/^data:image\/(png|jpeg|jpg);base64,/, "");
+
+    const response = await ai.models.generateContent({
+      model: MODEL_NAME,
+      contents: {
+        parts: [
+            { text: prompt },
+            {
+              inlineData: {
+                mimeType: "image/png",
+                data: cleanBase64
+              }
+            }
+        ]
+      },
+      config: {
+        maxOutputTokens: 2048,
+        temperature: 0.4,
+        responseMimeType: "application/json"
+      }
     });
-  }
 
-  return candidates.sort((a, b) => b.clusterSize - a.clusterSize);
-}
+    const endTime = performance.now();
+    debug.latency = Math.round(endTime - startTime);
+
+    let text = response.text || "{}";
+    debug.rawResponse = text;
+
+    // Robust JSON Extraction:
+    // Isolate the substring between the first '{' and the last '}'
+    const firstBrace = text.indexOf('{');
+    const lastBrace = text.lastIndexOf('}');
+
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        text = text.substring(firstBrace, lastBrace + 1);
+    }
+
+    try {
+        const json = JSON.parse(text);
+        debug.parsedResponse = json;
+
+        const r = Number(json.targetRow);
+        const c = Number(json.targetCol);
+
+        if (!isNaN(r) && !isNaN(c) && json.recommendedColor) {
+            return {
+                hint: {
+                    message: json.message || "Good shot available!",
+                    rationale: json.rationale,
+                    targetRow: r,
+                    targetCol: c,
+                    recommendedColor: json.recommendedColor.toLowerCase()
+                },
+                debug
+            };
+        }
+        return {
+            hint: getBestLocalTarget("AI returned invalid coordinates"),
+            debug: { ...debug, error: "Invalid Coordinates in JSON" }
+        };
+
+    } catch (e: any) {
+        console.warn("Failed to parse Gemini JSON:", text);
+        return {
+            hint: getBestLocalTarget("AI response parse error"),
+            debug: { ...debug, error: `JSON Parse Error: ${e.message}` }
+        };
+    }
+  } catch (error: any) {
+    console.error("Gemini API Error:", error);
+    const endTime = performance.now();
+    debug.latency = Math.round(endTime - startTime);
+    return {
+        hint: getBestLocalTarget("AI Service Unreachable"),
+        debug: { ...debug, error: error.message || "Unknown API Error" }
+    };
+  }
+};
